@@ -1,0 +1,16 @@
+{
+  "category": "LiveTV",
+  "description": "Catch-up / replay for Live TV: past programmes and start-over playback from recordings or an IPTV backend (Dispatcharr).",
+  "guid": "6f1c2b4e-8d3a-4c57-9e21-7b5a0c9d4e13",
+  "name": "Catch-up",
+  "overview": "Start-over and replay for Live TV programmes.",
+  "owner": "nicozellweger",
+  "targetAbi": "12.0.0.0",
+  "timestamp": "2026-11-09T00:00:00Z",
+  "version": "0.1.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": [
+    "Jellyfin.Plugin.Catchup.dll"
+  ]
+}

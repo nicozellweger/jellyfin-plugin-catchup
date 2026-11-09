@@ -1,0 +1,27 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish
+        run: dotnet publish src/Jellyfin.Plugin.Catchup -c Release -o out --nologo
+      - name: Package
+        run: |
+          VERSION=$(grep -oP '(?<=<Version>)[^<]+' src/Jellyfin.Plugin.Catchup/Jellyfin.Plugin.Catchup.csproj)
+          mkdir -p dist
+          cd out && zip -j ../dist/catchup_${VERSION}.zip Jellyfin.Plugin.Catchup.dll meta.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catchup-plugin
+          path: dist/*.zip

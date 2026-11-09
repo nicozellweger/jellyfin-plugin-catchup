@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Catch-up</title>
+</head>
+<body>
+<div id="CatchupConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <form id="CatchupConfigForm">
+                <h2 class="sectionTitle">Catch-up</h2>
+                <p>Start-over and replay for Live TV. Programmes with a recording play from the recording; otherwise the IPTV backend's catch-up is used.</p>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="DispatcharrUrl">Dispatcharr URL</label>
+                    <input id="DispatcharrUrl" name="DispatcharrUrl" type="text" is="emby-input" />
+                    <div class="fieldDescription">As reachable from the Jellyfin server, e.g. http://dispatcharr:9191</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="DispatcharrApiKey">Dispatcharr API key</label>
+                    <input id="DispatcharrApiKey" name="DispatcharrApiKey" type="password" is="emby-input" autocomplete="off" />
+                    <div class="fieldDescription">API key of a standard (non-admin) Dispatcharr user. Stored on the server only.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="DispatcharrProfile">Channel profile</label>
+                    <input id="DispatcharrProfile" name="DispatcharrProfile" type="text" is="emby-input" />
+                    <div class="fieldDescription">Same profile Jellyfin's tuner uses (e.g. Nicoflix). Empty = default.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="LookbackHours">Look back (hours)</label>
+                    <input id="LookbackHours" name="LookbackHours" type="number" min="1" max="168" is="emby-input" />
+                </div>
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="EnableProviderCatchup" name="EnableProviderCatchup" type="checkbox" is="emby-checkbox" />
+                        <span>Use provider catch-up (otherwise recordings only)</span>
+                    </label>
+                </div>
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+                </div>
+                <p id="CatchupStatus" class="fieldDescription"></p>
+            </form>
+        </div>
+    </div>
+    <script type="text/javascript">
+        (function () {
+            var pluginId = '6f1c2b4e-8d3a-4c57-9e21-7b5a0c9d4e13';
+            var page = document.querySelector('#CatchupConfigPage');
+            function status() {
+                ApiClient.getJSON(ApiClient.getUrl('Catchup/Info')).then(function (info) {
+                    var el = page.querySelector('#CatchupStatus');
+                    el.textContent = info.Error ? ('Backend error: ' + info.Error)
+                        : (info.Channels.length + ' channel(s) with catch-up detected.');
+                }).catch(function () { });
+            }
+            page.addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (c) {
+                    page.querySelector('#DispatcharrUrl').value = c.DispatcharrUrl || '';
+                    page.querySelector('#DispatcharrApiKey').value = c.DispatcharrApiKey || '';
+                    page.querySelector('#DispatcharrProfile').value = c.DispatcharrProfile || '';
+                    page.querySelector('#LookbackHours').value = c.LookbackHours || 72;
+                    page.querySelector('#EnableProviderCatchup').checked = c.EnableProviderCatchup !== false;
+                    Dashboard.hideLoadingMsg();
+                    status();
+                });
+            });
+            page.querySelector('#CatchupConfigForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (c) {
+                    c.DispatcharrUrl = page.querySelector('#DispatcharrUrl').value.trim();
+                    c.DispatcharrApiKey = page.querySelector('#DispatcharrApiKey').value.trim();
+                    c.DispatcharrProfile = page.querySelector('#DispatcharrProfile').value.trim();
+                    c.LookbackHours = parseInt(page.querySelector('#LookbackHours').value, 10) || 72;
+                    c.EnableProviderCatchup = page.querySelector('#EnableProviderCatchup').checked;
+                    ApiClient.updatePluginConfiguration(pluginId, c).then(function (r) {
+                        Dashboard.processPluginConfigurationUpdateResult(r);
+                        status();
+                    });
+                });
+                return false;
+            });
+        })();
+    </script>
+</div>
+</body>
+</html>
