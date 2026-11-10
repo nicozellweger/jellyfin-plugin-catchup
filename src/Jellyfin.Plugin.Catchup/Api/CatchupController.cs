@@ -1,5 +1,4 @@
-using System.Globalization;
-using System.Net;
+﻿using System.Globalization;
 using System.Security.Claims;
 using Jellyfin.Plugin.Catchup.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -82,15 +81,31 @@ public class CatchupController : ControllerBase
         });
     }
 
-    /// <summary>How to play a programme from its start: a recording item or a catch-up stream.</summary>
+    /// <summary>How to play a programme from its start (or from <paramref name="offset"/> seconds into it):
+    /// a recording item or a catch-up HLS stream.</summary>
     [HttpGet("Resolve")]
     public async Task<ActionResult<object>> Resolve(
         [FromQuery] Guid channelId,
         [FromQuery] DateTime startDate,
         [FromQuery] DateTime endDate,
+        [FromQuery] double? offset,
         CancellationToken ct)
     {
-        var result = await _service.ResolveAsync(channelId, startDate.ToUniversalTime(), endDate.ToUniversalTime(), CurrentUserId(), ct).ConfigureAwait(false);
+        ResolveResult? result;
+        try
+        {
+            result = await _service.ResolveAsync(channelId, startDate.ToUniversalTime(), endDate.ToUniversalTime(), CurrentUserId(), offset ?? 0, ct).ConfigureAwait(false);
+        }
+        catch (CatchupBusyException)
+        {
+            return Conflict(new { Error = "busy" });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "[Catch-up] Provider refused catch-up");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { Error = "provider_unavailable" });
+        }
+
         if (result is null)
         {
             return NotFound(new { Error = "not_available" });
@@ -105,81 +120,63 @@ public class CatchupController : ControllerBase
         });
     }
 
-    /// <summary>Catch-up stream (MPEG-TS) with Range support. The unguessable token is the authorisation,
+    /// <summary>HLS playlist of a catch-up job. The unguessable job id is the authorisation,
     /// because media players often cannot add auth headers to a stream URL.</summary>
-    [HttpGet("Stream/{token}")]
+    [HttpGet("Hls/{jobId}/index.m3u8")]
     [AllowAnonymous]
-    public async Task Stream([FromRoute] string token, CancellationToken ct)
+    public ActionResult Playlist([FromRoute] string jobId, [FromQuery] double? offset)
     {
-        string? url;
+        var job = _service.Jobs.Get(jobId);
+        if (job is null)
+        {
+            return NotFound();
+        }
+
+        Response.Headers.CacheControl = "no-cache";
+        return Content(CatchupJobManager.BuildPlaylist(job, offset), "application/vnd.apple.mpegurl");
+    }
+
+    /// <summary>One 6-second segment, produced on demand.</summary>
+    [HttpGet("Hls/{jobId}/{segment}")]
+    [AllowAnonymous]
+    public async Task<ActionResult> Segment([FromRoute] string jobId, [FromRoute] string segment, CancellationToken ct)
+    {
+        var job = _service.Jobs.Get(jobId);
+        if (job is null || !TryParseSegment(segment, out var index))
+        {
+            return NotFound();
+        }
+
+        string? path;
         try
         {
-            url = await _service.GetPlaybackUrlAsync(token, ct).ConfigureAwait(false);
+            path = await _service.Jobs.GetSegmentAsync(job, index, ct).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (CatchupBusyException)
         {
-            _logger.LogWarning(ex, "[Catch-up] Could not start catch-up session");
-            Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            return;
+            return Conflict(new { Error = "busy" });
         }
-
-        if (url is null)
+        catch (HttpRequestException ex)
         {
-            Response.StatusCode = StatusCodes.Status404NotFound;
-            return;
+            _logger.LogWarning(ex, "[Catch-up] Provider refused catch-up");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
 
-        var range = Request.Headers.Range.ToString();
-        var upstream = await _service.Backend.OpenStreamAsync(url, range, ct).ConfigureAwait(false);
-        if (upstream.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.Gone)
+        if (path is null)
         {
-            // session expired -> renew once
-            upstream.Dispose();
-            _service.ForgetPlaybackUrl(token);
-            url = await _service.GetPlaybackUrlAsync(token, ct).ConfigureAwait(false);
-            if (url is null)
-            {
-                Response.StatusCode = StatusCodes.Status404NotFound;
-                return;
-            }
-
-            upstream = await _service.Backend.OpenStreamAsync(url, range, ct).ConfigureAwait(false);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
 
-        using (upstream)
-        {
-            Response.StatusCode = (int)upstream.StatusCode;
-            Response.ContentType = upstream.Content.Headers.ContentType?.ToString() ?? "video/mp2t";
-            if (upstream.Content.Headers.ContentLength is { } len)
-            {
-                Response.ContentLength = len;
-            }
+        Response.Headers.CacheControl = "private, max-age=3600";
+        return PhysicalFile(path, "video/mp2t", enableRangeProcessing: true);
+    }
 
-            if (upstream.Content.Headers.ContentRange is { } cr)
-            {
-                Response.Headers.ContentRange = cr.ToString();
-            }
-
-            Response.Headers.AcceptRanges = "bytes";
-            if (!upstream.IsSuccessStatusCode)
-            {
-                return;
-            }
-
-            await using var body = await upstream.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            try
-            {
-                await body.CopyToAsync(Response.Body, 81920, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // client stopped or seeked
-            }
-            catch (IOException)
-            {
-                // client disconnected
-            }
-        }
+    private static bool TryParseSegment(string name, out int index)
+    {
+        index = -1;
+        return name.StartsWith("seg_", StringComparison.Ordinal)
+               && name.EndsWith(".ts", StringComparison.Ordinal)
+               && int.TryParse(name[4..^3], NumberStyles.None, CultureInfo.InvariantCulture, out index);
     }
 
     private Guid CurrentUserId()

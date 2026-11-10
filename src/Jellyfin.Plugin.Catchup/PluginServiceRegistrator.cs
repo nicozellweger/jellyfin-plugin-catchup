@@ -16,6 +16,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
             c.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-Catchup/0.1");
         });
         serviceCollection.AddSingleton<DispatcharrClient>();
+        serviceCollection.AddSingleton<CatchupJobManager>();
         serviceCollection.AddSingleton<CatchupService>();
     }
 }

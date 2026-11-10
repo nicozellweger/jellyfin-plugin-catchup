@@ -1,6 +1,4 @@
-using System.Collections.Concurrent;
-using System.Security.Cryptography;
-using Jellyfin.Data.Enums;
+﻿using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.Catchup.Configuration;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -34,21 +32,27 @@ public sealed record ResolveResult(string Kind, Guid? ItemId, string? StreamPath
 /// <summary>Combines Jellyfin channels/recordings with the backend's catch-up capability.</summary>
 public sealed class CatchupService
 {
-    private static readonly TimeSpan TicketTtl = TimeSpan.FromHours(12);
-
     private readonly ILibraryManager _libraryManager;
     private readonly ILiveTvManager _liveTvManager;
     private readonly DispatcharrClient _backend;
+    private readonly CatchupJobManager _jobs;
     private readonly ILogger<CatchupService> _logger;
-    private readonly ConcurrentDictionary<string, StreamTicket> _tickets = new();
 
-    public CatchupService(ILibraryManager libraryManager, ILiveTvManager liveTvManager, DispatcharrClient backend, ILogger<CatchupService> logger)
+    public CatchupService(
+        ILibraryManager libraryManager,
+        ILiveTvManager liveTvManager,
+        DispatcharrClient backend,
+        CatchupJobManager jobs,
+        ILogger<CatchupService> logger)
     {
         _libraryManager = libraryManager;
         _liveTvManager = liveTvManager;
         _backend = backend;
+        _jobs = jobs;
         _logger = logger;
     }
+
+    public CatchupJobManager Jobs => _jobs;
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
@@ -140,7 +144,7 @@ public sealed class CatchupService
     }
 
     /// <summary>Recording first, provider catch-up second.</summary>
-    public async Task<ResolveResult?> ResolveAsync(Guid channelId, DateTime startUtc, DateTime endUtc, Guid userId, CancellationToken ct)
+    public async Task<ResolveResult?> ResolveAsync(Guid channelId, DateTime startUtc, DateTime endUtc, Guid userId, double offsetSeconds, CancellationToken ct)
     {
         var recordings = await GetRecordingsAsync(userId, ct).ConfigureAwait(false);
         var title = await FindTitleAsync(channelId, startUtc, ct).ConfigureAwait(false);
@@ -156,38 +160,15 @@ public sealed class CatchupService
             return null;
         }
 
-        var duration = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
-        _tickets[token] = new StreamTicket(cc.BackendUuid, startUtc, duration, DateTime.UtcNow.Add(TicketTtl));
-        PruneTickets();
-        return new ResolveResult("catchup", null, $"Catchup/Stream/{token}", (endUtc - startUtc).TotalSeconds);
-    }
-
-    /// <summary>Upstream playback URL for a stream ticket (creates or renews the backend session).</summary>
-    public async Task<string?> GetPlaybackUrlAsync(string token, CancellationToken ct)
-    {
-        if (!_tickets.TryGetValue(token, out var ticket) || ticket.ExpiresUtc < DateTime.UtcNow)
+        // starts (or reuses) the download right away, so the first segments are ready when the player asks
+        var job = await _jobs.OpenAsync(cc.BackendUuid, startUtc, endUtc, userId, offsetSeconds, ct).ConfigureAwait(false);
+        var path = $"Catchup/Hls/{job.Id}/index.m3u8";
+        if (offsetSeconds > 0)
         {
-            return null;
+            path += "?offset=" + ((int)offsetSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        // Sessions are short-lived for the first request only; reuse a known URL and renew on failure.
-        if (ticket.PlaybackUrl is null)
-        {
-            var session = await _backend.CreateSessionAsync(ticket.BackendUuid, ticket.StartUtc, ticket.DurationMinutes, ct).ConfigureAwait(false);
-            ticket.PlaybackUrl = session.PlaybackUrl;
-            _logger.LogInformation("[Catch-up] Session {Session} for {Uuid} at {Start:u}", session.SessionId, ticket.BackendUuid, ticket.StartUtc);
-        }
-
-        return ticket.PlaybackUrl;
-    }
-
-    public void ForgetPlaybackUrl(string token)
-    {
-        if (_tickets.TryGetValue(token, out var ticket))
-        {
-            ticket.PlaybackUrl = null;
-        }
+        return new ResolveResult("catchup", null, path, job.TotalSeconds);
     }
 
     public DispatcharrClient Backend => _backend;
@@ -304,36 +285,4 @@ public sealed class CatchupService
         string.IsNullOrWhiteSpace(s) ? string.Empty
             : System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim();
 
-    private void PruneTickets()
-    {
-        var now = DateTime.UtcNow;
-        foreach (var kv in _tickets)
-        {
-            if (kv.Value.ExpiresUtc < now)
-            {
-                _tickets.TryRemove(kv.Key, out _);
-            }
-        }
-    }
-
-    private sealed class StreamTicket
-    {
-        public StreamTicket(Guid backendUuid, DateTime startUtc, int durationMinutes, DateTime expiresUtc)
-        {
-            BackendUuid = backendUuid;
-            StartUtc = startUtc;
-            DurationMinutes = durationMinutes;
-            ExpiresUtc = expiresUtc;
-        }
-
-        public Guid BackendUuid { get; }
-
-        public DateTime StartUtc { get; }
-
-        public int DurationMinutes { get; }
-
-        public DateTime ExpiresUtc { get; }
-
-        public string? PlaybackUrl { get; set; }
-    }
 }

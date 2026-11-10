@@ -22,4 +22,10 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Offer provider catch-up (otherwise only recordings are used for start-over).</summary>
     public bool EnableProviderCatchup { get; set; } = true;
+
+    /// <summary>Where catch-up downloads are kept (as seen by Jellyfin). Prefer a hard disk, not the system SSD.</summary>
+    public string CacheDirectory { get; set; } = "/data/recordings/.catchup";
+
+    /// <summary>Maximum size of the catch-up cache in GB (oldest finished downloads are removed first).</summary>
+    public int CacheLimitGb { get; set; } = 30;
 }
