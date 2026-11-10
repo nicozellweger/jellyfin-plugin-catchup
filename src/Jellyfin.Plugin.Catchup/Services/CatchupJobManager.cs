@@ -53,6 +53,14 @@ public sealed class CatchupJob
 
     internal string? LastError { get; set; }
 
+    /// <summary>The running chunk was stopped by us (seek, other programme), not by end of stream.</summary>
+    internal bool StoppedOnPurpose { get; set; }
+
+    internal int StartFailures { get; set; }
+
+    /// <summary>Last slot a player asked for (≈ play position).</summary>
+    internal int LastRequestedSegment { get; set; }
+
     internal SemaphoreSlim Gate { get; } = new(1, 1);
 
     public bool Downloading
@@ -105,7 +113,9 @@ public sealed class CatchupJobManager : IDisposable
     public static readonly TimeSpan Tail = TimeSpan.FromMinutes(5);
 
     private const int RestartAlignSegments = 10;   // provider timeshift works in whole minutes
-    private const int ReachSegments = 40;          // this close ahead of the writer we wait instead of restarting
+    // this close ahead of the writer we wait instead of restarting (~9 min of programme, ~20 s of download);
+    // Jellyfin's remuxer reads faster than the provider delivers and must not trigger restarts
+    private const int ReachSegments = 90;
     private static readonly TimeSpan JobTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan OwnerIdle = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan LiveDelay = TimeSpan.FromSeconds(20);
@@ -180,33 +190,30 @@ public sealed class CatchupJobManager : IDisposable
         return Math.Clamp(byTime, 0, job.TotalSegments);
     }
 
-    /// <summary>HLS playlist. Finished programmes are VOD; airing ones are an EVENT playlist that grows.</summary>
+    /// <summary>
+    /// HLS playlist covering the whole programme (VOD), also while it is still on air: slots in the
+    /// future are delivered in real time (the request waits), so the timeline always shows the full
+    /// programme and seeking works with every player and with Jellyfin's own remuxer.
+    /// </summary>
     public static string BuildPlaylist(CatchupJob job, double? startOffsetSeconds)
     {
-        var visible = VisibleSegments(job);
-        var complete = visible >= job.TotalSegments;
         var sb = new StringBuilder();
         sb.Append("#EXTM3U\n#EXT-X-VERSION:3\n");
         sb.Append("#EXT-X-TARGETDURATION:").Append(SegmentSeconds + 4).Append('\n');
         sb.Append("#EXT-X-MEDIA-SEQUENCE:0\n");
-        sb.Append("#EXT-X-PLAYLIST-TYPE:").Append(complete ? "VOD" : "EVENT").Append('\n');
-        double? offset = startOffsetSeconds ?? (complete ? null : 0d);
-        if (offset is { } o)
+        sb.Append("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        if (startOffsetSeconds is { } o && o > 0)
         {
-            sb.Append("#EXT-X-START:TIME-OFFSET=").Append(Math.Max(0, o).ToString("0.###", CultureInfo.InvariantCulture)).Append(",PRECISE=YES\n");
+            sb.Append("#EXT-X-START:TIME-OFFSET=").Append(o.ToString("0.###", CultureInfo.InvariantCulture)).Append(",PRECISE=YES\n");
         }
 
-        for (var i = 0; i < visible; i++)
+        for (var i = 0; i < job.TotalSegments; i++)
         {
             sb.Append("#EXTINF:").Append(job.SegmentDuration(i).ToString("0.000", CultureInfo.InvariantCulture)).Append(",\n");
             sb.Append(CatchupJob.SegmentName(i)).Append('\n');
         }
 
-        if (complete)
-        {
-            sb.Append("#EXT-X-ENDLIST\n");
-        }
-
+        sb.Append("#EXT-X-ENDLIST\n");
         return sb.ToString();
     }
 
@@ -219,23 +226,26 @@ public sealed class CatchupJobManager : IDisposable
         }
 
         job.LastAccessUtc = DateTime.UtcNow;
+        job.LastRequestedSegment = index;
         var path = job.SegmentPath(index);
         if (File.Exists(path))
         {
             return path;
         }
 
-        // normally 25 s; a slot still on air is written in real time, so wait until shortly after it ends (max 40 s)
+        // normally 30 s; a slot still on air is written in real time, so wait until shortly after it has aired.
+        // Slots far in the future (a seek past "now") are refused at once.
         var now = DateTime.UtcNow;
-        var due = job.SegmentStartUtc(index + 1) + TimeSpan.FromSeconds(10);
-        var until = now + TimeSpan.FromSeconds(25);
-        if (due > until)
+        var due = job.SegmentStartUtc(index + 1) + TimeSpan.FromSeconds(15);
+        if (due - now > TimeSpan.FromMinutes(3))
         {
-            until = due < now + TimeSpan.FromSeconds(40) ? due : now + TimeSpan.FromSeconds(40);
+            return null;
         }
 
+        var until = due > now + TimeSpan.FromSeconds(30) ? due : now + TimeSpan.FromSeconds(30);
+
         await EnsureProducingAsync(job, index, ct).ConfigureAwait(false);
-        var retried = false;
+        var idleSince = DateTime.MaxValue;
         while (DateTime.UtcNow < until)
         {
             if (File.Exists(path))
@@ -243,15 +253,18 @@ public sealed class CatchupJobManager : IDisposable
                 return path;
             }
 
-            if (!job.Downloading)
+            if (job.Downloading)
             {
-                if (retried)
-                {
-                    break;
-                }
-
-                // chunk ended early (provider hiccup) – one fresh attempt from here
-                retried = true;
+                idleSince = DateTime.MaxValue;
+            }
+            else if (idleSince == DateTime.MaxValue)
+            {
+                idleSince = DateTime.UtcNow;
+            }
+            else if (DateTime.UtcNow - idleSince > TimeSpan.FromSeconds(10))
+            {
+                // nothing running and no automatic retry came: start again from here
+                idleSince = DateTime.MaxValue;
                 await EnsureProducingAsync(job, index, ct).ConfigureAwait(false);
             }
 
@@ -312,13 +325,34 @@ public sealed class CatchupJobManager : IDisposable
                 }
             }
 
+            var killed = false;
             foreach (var other in _jobs.Values.Where(j => j.Downloading))
             {
                 Kill(other);
+                killed = true;
+            }
+
+            if (killed)
+            {
+                // give the provider a moment to release the connection we just closed
+                await Task.Delay(1500, ct).ConfigureAwait(false);
+            }
+
+            // download only up to the next part that is already on disk (plus one slot of overlap)
+            var stop = job.TotalSegments;
+            for (var i = startSegment + RestartAlignSegments; i < job.TotalSegments; i++)
+            {
+                if (File.Exists(job.SegmentPath(i)))
+                {
+                    stop = Math.Min(job.TotalSegments, i + 1);
+                    break;
+                }
             }
 
             var offset = TimeSpan.FromSeconds(startSegment * SegmentSeconds);
-            var remaining = (int)Math.Ceiling(job.TotalSeconds - (startSegment * SegmentSeconds));
+            var remaining = stop >= job.TotalSegments
+                ? (int)Math.Ceiling(job.TotalSeconds - (startSegment * SegmentSeconds))
+                : (stop - startSegment) * SegmentSeconds;
             var minutes = Math.Max(1, (int)Math.Ceiling(remaining / 60.0));
             BackendSession session;
             try
@@ -384,16 +418,97 @@ public sealed class CatchupJobManager : IDisposable
         };
         process.Exited += (_, _) =>
         {
-            if (stderr.Length > 0)
+            job.LastError = stderr.Length > 0 ? stderr.ToString() : null;
+            int code;
+            try
             {
-                job.LastError = stderr.ToString();
-                _logger.LogInformation("[Catch-up] Job {Job} ffmpeg: {Err}", job.Id, Truncate(job.LastError, 500));
+                code = process.ExitCode;
+            }
+            catch (InvalidOperationException)
+            {
+                code = -1;
+            }
+
+            _logger.LogInformation(
+                "[Catch-up] Job {Job}: chunk from {Start} ended (code {Code}, {Purpose}, written up to {Last}) {Err}",
+                job.Id,
+                startSegment,
+                code,
+                job.StoppedOnPurpose ? "stopped" : "natural",
+                HighestWritten(job),
+                Truncate(job.LastError, 300));
+
+            if (!ReferenceEquals(job.Process, process) || job.StoppedOnPurpose || DateTime.UtcNow - job.LastAccessUtc > OwnerIdle)
+            {
+                return;
+            }
+
+            // the provider refused (it may still count the connection we just closed): retry the same chunk
+            if (code != 0 && HighestWritten(job) < startSegment)
+            {
+                var attempt = ++job.StartFailures;
+                if (attempt <= 4)
+                {
+                    _logger.LogInformation("[Catch-up] Job {Job}: retrying chunk {Start} (attempt {Attempt})", job.Id, startSegment, attempt);
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(2 * attempt)).ConfigureAwait(false);
+                            await job.Gate.WaitAsync().ConfigureAwait(false);
+                            try
+                            {
+                                if (ReferenceEquals(job.Process, process))
+                                {
+                                    await StartChunkAsync(job, startSegment, CancellationToken.None).ConfigureAwait(false);
+                                }
+                            }
+                            finally
+                            {
+                                job.Gate.Release();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "[Catch-up] Retry for {Job} not started", job.Id);
+                        }
+                    });
+                }
+
+                return;
+            }
+
+            job.StartFailures = 0;
+            if (code != 0)
+            {
+                return; // broke off mid-stream; the next segment request restarts it where needed
+            }
+
+            // fill missing parts while the viewer is still around: first ahead of the play position, then the rest
+            var from = Math.Clamp(job.LastRequestedSegment, 0, job.TotalSegments - 1);
+            var gap = Enumerable.Range(from, job.TotalSegments - from)
+                .Concat(Enumerable.Range(0, from))
+                .FirstOrDefault(i => !File.Exists(job.SegmentPath(i)), -1);
+            if (gap >= 0 && job.SegmentStartUtc(gap + 1) < DateTime.UtcNow)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await EnsureProducingAsync(job, gap, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "[Catch-up] Gap fill for {Job} not started", job.Id);
+                    }
+                });
             }
         };
-        process.Start();
-        process.BeginErrorReadLine();
+        job.StoppedOnPurpose = false;
         job.ChunkStart = startSegment;
         job.Process = process;
+        process.Start();
+        process.BeginErrorReadLine();
     }
 
     private void Kill(CatchupJob job)
@@ -402,6 +517,7 @@ public sealed class CatchupJobManager : IDisposable
         {
             if (job.Process is { HasExited: false } p)
             {
+                job.StoppedOnPurpose = true;
                 p.Kill(true);
                 p.WaitForExit(3000);
             }

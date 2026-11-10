@@ -4,7 +4,11 @@ using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.LiveTv;
 using Microsoft.Extensions.Logging;
 
@@ -36,6 +40,8 @@ public sealed class CatchupService
     private readonly ILiveTvManager _liveTvManager;
     private readonly DispatcharrClient _backend;
     private readonly CatchupJobManager _jobs;
+    private readonly IMediaEncoder _mediaEncoder;
+    private readonly IMediaSourceManager _mediaSourceManager;
     private readonly ILogger<CatchupService> _logger;
 
     public CatchupService(
@@ -43,16 +49,87 @@ public sealed class CatchupService
         ILiveTvManager liveTvManager,
         DispatcharrClient backend,
         CatchupJobManager jobs,
+        IMediaEncoder mediaEncoder,
+        IMediaSourceManager mediaSourceManager,
         ILogger<CatchupService> logger)
     {
         _libraryManager = libraryManager;
         _liveTvManager = liveTvManager;
         _backend = backend;
         _jobs = jobs;
+        _mediaEncoder = mediaEncoder;
+        _mediaSourceManager = mediaSourceManager;
         _logger = logger;
     }
 
     public CatchupJobManager Jobs => _jobs;
+
+    /// <summary>
+    /// Media source for the Replay channel: a finished recording when there is one (or when the
+    /// provider has no catch-up), otherwise the provider catch-up as HLS that Jellyfin remuxes for the client.
+    /// </summary>
+    public async Task<MediaSourceInfo?> GetPlaybackSourceAsync(Guid channelId, DateTime startUtc, DateTime endUtc, Guid userId, CancellationToken ct)
+    {
+        var cc = (await GetCatchupChannelsAsync(ct).ConfigureAwait(false)).FirstOrDefault(c => c.ChannelId == channelId);
+        var providerOk = cc is not null && startUtc >= DateTime.UtcNow.AddDays(-cc.CatchupDays);
+        var finished = endUtc + CatchupJobManager.Tail < DateTime.UtcNow;
+
+        if (finished || !providerOk)
+        {
+            var recordings = await GetRecordingsAsync(userId, ct).ConfigureAwait(false);
+            var title = await FindTitleAsync(channelId, startUtc, ct).ConfigureAwait(false);
+            var rec = MatchRecording(recordings, channelId, startUtc, endUtc, title);
+            if (rec is not null && _libraryManager.GetItemById(rec.Value) is { } recItem)
+            {
+                var sources = _mediaSourceManager.GetStaticMediaSources(recItem, false);
+                if (sources.Count > 0)
+                {
+                    return sources[0];
+                }
+            }
+        }
+
+        if (!providerOk)
+        {
+            return null;
+        }
+
+        var job = await _jobs.OpenAsync(cc!.BackendUuid, startUtc, endUtc, userId, 0, ct).ConfigureAwait(false);
+        var first = await _jobs.GetSegmentAsync(job, 0, ct).ConfigureAwait(false)
+                    ?? throw new HttpRequestException("Catch-up stream did not start");
+
+        // stream layout from the first segment, so Jellyfin can decide copy vs transcode without probing the playlist
+        var info = await _mediaEncoder.GetMediaInfo(
+            new MediaInfoRequest
+            {
+                MediaSource = new MediaSourceInfo { Path = first, Protocol = MediaProtocol.File },
+                MediaType = DlnaProfileType.Video,
+                ExtractChapters = false,
+            },
+            ct).ConfigureAwait(false);
+
+        return new MediaSourceInfo
+        {
+            Name = "Replay",
+            Path = $"http://127.0.0.1:8096/Catchup/Hls/{job.Id}/index.m3u8",
+            Protocol = MediaProtocol.Http,
+            Container = "hls",
+            Type = MediaSourceType.Default,
+            VideoType = VideoType.VideoFile,
+            RunTimeTicks = TimeSpan.FromSeconds(job.TotalSeconds).Ticks,
+            MediaStreams = info.MediaStreams,
+            Bitrate = info.Bitrate,
+            SupportsDirectPlay = false,
+            SupportsDirectStream = false,
+            SupportsTranscoding = true,
+            SupportsProbing = false,
+            AnalyzeDurationMs = 3000, // streams are already known; keeps seeks fast
+            IsRemote = false,
+            IsInfiniteStream = false,
+            RequiresOpening = false,
+            RequiresClosing = false,
+        };
+    }
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 

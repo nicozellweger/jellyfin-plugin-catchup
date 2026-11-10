@@ -1,6 +1,9 @@
 ﻿using System.Globalization;
 using System.Security.Claims;
+using Jellyfin.Plugin.Catchup.Channels;
 using Jellyfin.Plugin.Catchup.Services;
+using MediaBrowser.Controller.Channels;
+using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -15,11 +18,15 @@ namespace Jellyfin.Plugin.Catchup.Api;
 public class CatchupController : ControllerBase
 {
     private readonly CatchupService _service;
+    private readonly ILibraryManager _libraryManager;
+    private readonly IChannelManager _channelManager;
     private readonly ILogger<CatchupController> _logger;
 
-    public CatchupController(CatchupService service, ILogger<CatchupController> logger)
+    public CatchupController(CatchupService service, ILibraryManager libraryManager, IChannelManager channelManager, ILogger<CatchupController> logger)
     {
         _service = service;
+        _libraryManager = libraryManager;
+        _channelManager = channelManager;
         _logger = logger;
     }
 
@@ -111,10 +118,25 @@ public class CatchupController : ControllerBase
             return NotFound(new { Error = "not_available" });
         }
 
+        // catch-up also as an item of the Replay channel, so clients can use their normal player
+        Guid? itemId = result.ItemId;
+        if (result.Kind == "catchup")
+        {
+            try
+            {
+                var item = await ReplayChannel.FindOrCreateItemAsync(_libraryManager, _channelManager, channelId, startDate.ToUniversalTime(), endDate.ToUniversalTime(), ct).ConfigureAwait(false);
+                itemId = item?.Id;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "[Catch-up] Replay item lookup failed");
+            }
+        }
+
         return Ok(new
         {
             result.Kind,
-            ItemId = result.ItemId?.ToString("N"),
+            ItemId = itemId?.ToString("N"),
             result.StreamPath,
             result.DurationSeconds,
         });

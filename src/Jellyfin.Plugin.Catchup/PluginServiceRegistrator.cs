@@ -18,5 +18,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<DispatcharrClient>();
         serviceCollection.AddSingleton<CatchupJobManager>();
         serviceCollection.AddSingleton<CatchupService>();
+        serviceCollection.AddSingleton<MediaBrowser.Controller.Channels.IChannel, Channels.ReplayChannel>();
     }
 }
