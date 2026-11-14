@@ -139,6 +139,7 @@ public class CatchupController : ControllerBase
             ItemId = itemId?.ToString("N"),
             result.StreamPath,
             result.DurationSeconds,
+            result.ItemStartUtc,
         });
     }
 

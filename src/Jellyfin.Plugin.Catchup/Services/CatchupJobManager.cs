@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -119,6 +119,8 @@ public sealed class CatchupJobManager : IDisposable
     private static readonly TimeSpan JobTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan OwnerIdle = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan LiveDelay = TimeSpan.FromSeconds(20);
+    // nobody asked for this long: the viewer is gone, stop downloading and free the provider connection
+    private static readonly TimeSpan DownloadIdle = TimeSpan.FromSeconds(90);
 
     private readonly DispatcharrClient _backend;
     private readonly IMediaEncoder _mediaEncoder;
@@ -131,6 +133,29 @@ public sealed class CatchupJobManager : IDisposable
         _backend = backend;
         _mediaEncoder = mediaEncoder;
         _logger = logger;
+        _watchdog = new Timer(_ => StopIdleDownloads(), null, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(20));
+    }
+
+    private readonly Timer _watchdog;
+
+    /// <summary>
+    /// A download outlives its viewer otherwise: it would load the rest of the programme (gigabytes
+    /// for a match) and hold the provider's only connection. What is on disk stays and is reused.
+    /// </summary>
+    private void StopIdleDownloads()
+    {
+        try
+        {
+            foreach (var job in _jobs.Values.Where(j => j.Downloading && DateTime.UtcNow - j.LastAccessUtc > DownloadIdle))
+            {
+                _logger.LogInformation("[Catch-up] Job {Job}: no viewer for {Sec} s, stopping download", job.Id, (int)DownloadIdle.TotalSeconds);
+                Kill(job);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[Catch-up] Idle check failed");
+        }
     }
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
@@ -152,7 +177,9 @@ public sealed class CatchupJobManager : IDisposable
     /// Returns the job for a programme (reused when it exists) and starts downloading at
     /// <paramref name="offsetSeconds"/> so the first segments are ready when the player asks.
     /// </summary>
-    public async Task<CatchupJob> OpenAsync(Guid backendUuid, DateTime startUtc, DateTime endUtc, Guid userId, double offsetSeconds, CancellationToken ct)
+    /// <remarks>Without an offset a download that is already running for the job is left alone
+    /// (the player was sent somewhere else on purpose); otherwise it starts at the beginning.</remarks>
+    public async Task<CatchupJob> OpenAsync(Guid backendUuid, DateTime startUtc, DateTime endUtc, Guid userId, double? offsetSeconds, CancellationToken ct)
     {
         Cleanup();
         var job = _jobs.Values.FirstOrDefault(j => j.BackendUuid == backendUuid && j.StartUtc == startUtc);
@@ -168,7 +195,12 @@ public sealed class CatchupJobManager : IDisposable
         var previousOwner = job.OwnerUserId;
         job.OwnerUserId = userId;
         job.LastAccessUtc = DateTime.UtcNow;
-        var first = Math.Clamp((int)(offsetSeconds / SegmentSeconds), 0, job.TotalSegments - 1);
+        if (offsetSeconds is null && job.Downloading)
+        {
+            return job;
+        }
+
+        var first = Math.Clamp((int)((offsetSeconds ?? 0) / SegmentSeconds), 0, job.TotalSegments - 1);
         try
         {
             await EnsureProducingAsync(job, first, ct).ConfigureAwait(false);
@@ -215,6 +247,25 @@ public sealed class CatchupJobManager : IDisposable
 
         sb.Append("#EXT-X-ENDLIST\n");
         return sb.ToString();
+    }
+
+    /// <summary>Any finished segment of the job, for reading the stream layout: one that is on disk,
+    /// else the first one the running download writes, else the start of the programme.</summary>
+    public async Task<string?> GetProbeSegmentAsync(CatchupJob job, CancellationToken ct)
+    {
+        try
+        {
+            var existing = System.IO.Directory.EnumerateFiles(job.Directory, "seg_*.ts").OrderBy(f => f, StringComparer.Ordinal).FirstOrDefault();
+            if (existing is not null)
+            {
+                return existing;
+            }
+        }
+        catch (IOException)
+        {
+        }
+
+        return await GetSegmentAsync(job, job.Downloading ? Math.Max(job.ChunkStart, 0) : 0, ct).ConfigureAwait(false);
     }
 
     /// <summary>Path of a finished segment, producing it on demand. Null when it cannot be delivered.</summary>
@@ -623,6 +674,7 @@ public sealed class CatchupJobManager : IDisposable
 
     public void Dispose()
     {
+        _watchdog.Dispose();
         foreach (var job in _jobs.Values)
         {
             Kill(job);

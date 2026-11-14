@@ -31,7 +31,7 @@ public sealed record CatchupProgramme(
     bool HasProviderCatchup);
 
 /// <summary>How a programme can be played from its start.</summary>
-public sealed record ResolveResult(string Kind, Guid? ItemId, string? StreamPath, double? DurationSeconds);
+public sealed record ResolveResult(string Kind, Guid? ItemId, string? StreamPath, double? DurationSeconds, DateTime? ItemStartUtc = null);
 
 /// <summary>Combines Jellyfin channels/recordings with the backend's catch-up capability.</summary>
 public sealed class CatchupService
@@ -64,6 +64,9 @@ public sealed class CatchupService
 
     public CatchupJobManager Jobs => _jobs;
 
+    private static readonly TimeSpan LayoutTtl = TimeSpan.FromHours(12);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<MediaStream> Streams, int? Bitrate, DateTime At)> _layouts = new();
+
     /// <summary>
     /// Media source for the Replay channel: a finished recording when there is one (or when the
     /// provider has no catch-up), otherwise the provider catch-up as HLS that Jellyfin remuxes for the client.
@@ -94,19 +97,31 @@ public sealed class CatchupService
             return null;
         }
 
-        var job = await _jobs.OpenAsync(cc!.BackendUuid, startUtc, endUtc, userId, 0, ct).ConfigureAwait(false);
-        var first = await _jobs.GetSegmentAsync(job, 0, ct).ConfigureAwait(false)
-                    ?? throw new HttpRequestException("Catch-up stream did not start");
+        var job = await _jobs.OpenAsync(cc!.BackendUuid, startUtc, endUtc, userId, null, ct).ConfigureAwait(false);
 
-        // stream layout from the first segment, so Jellyfin can decide copy vs transcode without probing the playlist
-        var info = await _mediaEncoder.GetMediaInfo(
-            new MediaInfoRequest
+        // Stream layout (codecs, audio tracks) is a property of the channel, not of the programme:
+        // probe it once per channel and reuse it, so later starts answer at once while the
+        // download is still connecting. Jellyfin needs it to decide copy vs transcode.
+        if (!_layouts.TryGetValue(cc.BackendUuid, out var layout) || DateTime.UtcNow - layout.At > LayoutTtl)
+        {
+            var first = await _jobs.GetProbeSegmentAsync(job, ct).ConfigureAwait(false)
+                        ?? throw new HttpRequestException("Catch-up stream did not start");
+            var probed = await _mediaEncoder.GetMediaInfo(
+                new MediaInfoRequest
+                {
+                    MediaSource = new MediaSourceInfo { Path = first, Protocol = MediaProtocol.File },
+                    MediaType = DlnaProfileType.Video,
+                    ExtractChapters = false,
+                },
+                ct).ConfigureAwait(false);
+            layout = (probed.MediaStreams, probed.Bitrate, DateTime.UtcNow);
+            if (probed.MediaStreams.Any(m => m.Type == MediaStreamType.Video))
             {
-                MediaSource = new MediaSourceInfo { Path = first, Protocol = MediaProtocol.File },
-                MediaType = DlnaProfileType.Video,
-                ExtractChapters = false,
-            },
-            ct).ConfigureAwait(false);
+                _layouts[cc.BackendUuid] = layout;
+            }
+        }
+
+        var info = (MediaStreams: layout.Streams, Bitrate: layout.Bitrate);
 
         return new MediaSourceInfo
         {
@@ -228,7 +243,7 @@ public sealed class CatchupService
         var rec = MatchRecording(recordings, channelId, startUtc, endUtc, title);
         if (rec is not null)
         {
-            return new ResolveResult("recording", rec, null, null);
+            return new ResolveResult("recording", rec, null, null, RecordingFileStart(recordings.FirstOrDefault(r => r.Id == rec.Value), startUtc));
         }
 
         var cc = (await GetCatchupChannelsAsync(ct).ConfigureAwait(false)).FirstOrDefault(c => c.ChannelId == channelId);
@@ -353,6 +368,32 @@ public sealed class CatchupService
             {
                 return r.Id;
             }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Wall-clock time of position 0 in a recording. Recordings start before the programme
+    /// (pre-padding) or in the middle of it, so "20 minutes ago" is not "20 minutes minus
+    /// programme start". The file's creation time is when recording really began.
+    /// </summary>
+    private static DateTime? RecordingFileStart(BaseItemDto? recording, DateTime programmeStartUtc)
+    {
+        try
+        {
+            if (recording?.Path is { Length: > 0 } path && File.Exists(path))
+            {
+                var created = File.GetCreationTimeUtc(path);
+                // sanity: within an hour before the programme and not in the future
+                if (created > programmeStartUtc.AddHours(-1) && created <= DateTime.UtcNow)
+                {
+                    return created;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
         }
 
         return null;
