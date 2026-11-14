@@ -64,7 +64,58 @@ public sealed class CatchupService
 
     public CatchupJobManager Jobs => _jobs;
 
-    private static readonly TimeSpan LayoutTtl = TimeSpan.FromHours(12);
+    // a channel's codecs and audio tracks change rarely; a wrong guess only costs a transcode decision
+    private static readonly TimeSpan LayoutTtl = TimeSpan.FromDays(7);
+    private bool _layoutsLoaded;
+
+    private sealed record StoredLayout(Guid Channel, List<MediaStream> Streams, int? Bitrate, DateTime At);
+
+    private static string LayoutFile => Path.Combine(Config.CacheDirectory, "layouts.json");
+
+    /// <summary>Layouts survive a server restart, so the first start per channel is not slow again.</summary>
+    private void LoadLayouts()
+    {
+        if (_layoutsLoaded)
+        {
+            return;
+        }
+
+        _layoutsLoaded = true;
+        try
+        {
+            if (!File.Exists(LayoutFile))
+            {
+                return;
+            }
+
+            var stored = System.Text.Json.JsonSerializer.Deserialize<List<StoredLayout>>(File.ReadAllText(LayoutFile));
+            foreach (var l in stored ?? new List<StoredLayout>())
+            {
+                if (l.Streams is { Count: > 0 } && l.Streams.Any(m => m.Type == MediaStreamType.Video))
+                {
+                    _layouts.TryAdd(l.Channel, (l.Streams, l.Bitrate, l.At));
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or NotSupportedException)
+        {
+            _logger.LogDebug(ex, "[Catch-up] Stored stream layouts not readable, probing again");
+        }
+    }
+
+    private void SaveLayouts()
+    {
+        try
+        {
+            var stored = _layouts.Select(kv => new StoredLayout(kv.Key, kv.Value.Streams.ToList(), kv.Value.Bitrate, kv.Value.At)).ToList();
+            System.IO.Directory.CreateDirectory(Config.CacheDirectory);
+            File.WriteAllText(LayoutFile, System.Text.Json.JsonSerializer.Serialize(stored));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            _logger.LogDebug(ex, "[Catch-up] Could not store stream layouts");
+        }
+    }
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<MediaStream> Streams, int? Bitrate, DateTime At)> _layouts = new();
 
     /// <summary>
@@ -102,6 +153,7 @@ public sealed class CatchupService
         // Stream layout (codecs, audio tracks) is a property of the channel, not of the programme:
         // probe it once per channel and reuse it, so later starts answer at once while the
         // download is still connecting. Jellyfin needs it to decide copy vs transcode.
+        LoadLayouts();
         if (!_layouts.TryGetValue(cc.BackendUuid, out var layout) || DateTime.UtcNow - layout.At > LayoutTtl)
         {
             var first = await _jobs.GetProbeSegmentAsync(job, ct).ConfigureAwait(false)
@@ -118,6 +170,7 @@ public sealed class CatchupService
             if (probed.MediaStreams.Any(m => m.Type == MediaStreamType.Video))
             {
                 _layouts[cc.BackendUuid] = layout;
+                SaveLayouts();
             }
         }
 
