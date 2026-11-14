@@ -51,6 +51,12 @@ public sealed class CatchupJob
 
     internal Process? Process { get; set; }
 
+    /// <summary>When a viewer last opened this programme. The most recently opened one owns the connection.</summary>
+    internal DateTime OpenedUtc { get; set; }
+
+    /// <summary>When the running chunk was started (for the download speed).</summary>
+    internal DateTime ChunkStartedUtc { get; set; }
+
     internal string? LastError { get; set; }
 
     /// <summary>The running chunk was stopped by us (seek, other programme), not by end of stream.</summary>
@@ -113,9 +119,11 @@ public sealed class CatchupJobManager : IDisposable
     public static readonly TimeSpan Tail = TimeSpan.FromMinutes(5);
 
     private const int RestartAlignSegments = 10;   // provider timeshift works in whole minutes
-    // this close ahead of the writer we wait instead of restarting (~9 min of programme, ~20 s of download);
-    // Jellyfin's remuxer reads faster than the provider delivers and must not trigger restarts
-    private const int ReachSegments = 90;
+    // A slot the writer reaches within this time is waited for; anything further restarts the download
+    // at the slot (a restart costs about 5 s). Measured, because providers deliver anywhere between
+    // 8x and 25x real time. Jellyfin's remuxer reads just ahead of the writer and must not trigger restarts.
+    private static readonly TimeSpan ReachTime = TimeSpan.FromSeconds(8);
+    private const int ReachSegmentsMin = 12;
     private static readonly TimeSpan JobTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan OwnerIdle = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan LiveDelay = TimeSpan.FromSeconds(20);
@@ -192,8 +200,13 @@ public sealed class CatchupJobManager : IDisposable
             _logger.LogInformation("[Catch-up] Job {Job}: {Uuid} {Start:u}–{End:u}", job.Id, backendUuid, startUtc, endUtc);
         }
 
+        job.OpenedUtc = DateTime.UtcNow;
         var previousOwner = job.OwnerUserId;
-        job.OwnerUserId = userId;
+        if (userId != Guid.Empty || previousOwner == Guid.Empty)
+        {
+            job.OwnerUserId = userId; // a call without a user (server-internal) never takes a job over
+        }
+
         job.LastAccessUtc = DateTime.UtcNow;
         if (offsetSeconds is null && job.Downloading)
         {
@@ -297,6 +310,7 @@ public sealed class CatchupJobManager : IDisposable
 
         await EnsureProducingAsync(job, index, ct).ConfigureAwait(false);
         var idleSince = DateTime.MaxValue;
+        var checkedAt = DateTime.UtcNow;
         while (DateTime.UtcNow < until)
         {
             if (File.Exists(path))
@@ -307,6 +321,13 @@ public sealed class CatchupJobManager : IDisposable
             if (job.Downloading)
             {
                 idleSince = DateTime.MaxValue;
+                // The download may have been sent elsewhere meanwhile (an older reader, a gap fill).
+                // While this is still the newest request, bring it back instead of waiting in vain.
+                if (job.LastRequestedSegment == index && DateTime.UtcNow - checkedAt > TimeSpan.FromSeconds(3))
+                {
+                    checkedAt = DateTime.UtcNow;
+                    await EnsureProducingAsync(job, index, ct).ConfigureAwait(false);
+                }
             }
             else if (idleSince == DateTime.MaxValue)
             {
@@ -336,9 +357,18 @@ public sealed class CatchupJobManager : IDisposable
                 return;
             }
 
-            if (job.Downloading && index >= job.ChunkStart && index <= HighestWritten(job) + ReachSegments)
+            if (job.Downloading && index >= job.ChunkStart)
             {
-                return; // the writer is on its way
+                var highest = HighestWritten(job);
+                var elapsed = (DateTime.UtcNow - job.ChunkStartedUtc).TotalSeconds;
+                var written = highest - job.ChunkStart + 1;
+                // slots per second; until there is something to measure assume a slow provider
+                var rate = elapsed > 3 && written > 3 ? written / elapsed : 1.2;
+                var reach = Math.Max(ReachSegmentsMin, (int)(rate * ReachTime.TotalSeconds));
+                if (index <= highest + reach)
+                {
+                    return; // the writer is on its way
+                }
             }
 
             // restart at a whole minute at or before the wanted slot
@@ -373,6 +403,17 @@ public sealed class CatchupJobManager : IDisposable
                 if (other.OwnerUserId != job.OwnerUserId && DateTime.UtcNow - other.LastAccessUtc < OwnerIdle)
                 {
                     throw new CatchupBusyException("The catch-up connection is in use by another viewer.");
+                }
+            }
+
+            // One connection, several readers: a programme opened earlier may still be read by a stream
+            // nobody watches any more (a transcode that was not closed). It must not take the connection
+            // back from what the viewer opened last, or the two would interrupt each other forever.
+            foreach (var other in _jobs.Values.Where(j => j.Downloading && j != job))
+            {
+                if (other.OpenedUtc > job.OpenedUtc && DateTime.UtcNow - other.LastAccessUtc < TimeSpan.FromSeconds(30))
+                {
+                    throw new CatchupBusyException("A programme opened later is using the catch-up connection.");
                 }
             }
 
@@ -556,6 +597,7 @@ public sealed class CatchupJobManager : IDisposable
             }
         };
         job.StoppedOnPurpose = false;
+        job.ChunkStartedUtc = DateTime.UtcNow;
         job.ChunkStart = startSegment;
         job.Process = process;
         process.Start();
