@@ -470,6 +470,13 @@ public sealed class CatchupJobManager : IDisposable
 
     private void StartFfmpeg(CatchupJob job, string inputUrl, int startSegment, int seconds)
     {
+        // The URL comes from the backend's answer. ffmpeg would also read file:, concat: and friends,
+        // so a backend that answers with something else than a web address must not reach it.
+        if (!Uri.TryCreate(inputUrl, UriKind.Absolute, out var input) || (input.Scheme != Uri.UriSchemeHttp && input.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new HttpRequestException("The catch-up backend returned an address that is not http(s).");
+        }
+
         var psi = new ProcessStartInfo
         {
             FileName = _mediaEncoder.EncoderPath,
@@ -482,6 +489,7 @@ public sealed class CatchupJobManager : IDisposable
                  {
                      "-nostdin", "-hide_banner", "-loglevel", "error",
                      "-fflags", "+genpts+discardcorrupt",
+                     "-protocol_whitelist", "http,https,tcp,tls,crypto",
                      "-i", inputUrl,
                      "-map", "0:v:0?", "-map", "0:a?",
                      "-c", "copy",

@@ -67,6 +67,20 @@ public sealed class CatchupService
 
     public CatchupJobManager Jobs => _jobs;
 
+    /// <summary>Longest programme a client may ask for. Start and end come from the request; without a
+    /// bound a single call could ask for a playlist of millions of segments.</summary>
+    public static readonly TimeSpan MaxProgrammeLength = TimeSpan.FromHours(12);
+
+    /// <summary>A time span a client may ask for: a real programme, not in the future, not ancient.</summary>
+    public static bool IsPlausibleSpan(DateTime startUtc, DateTime endUtc)
+    {
+        var now = DateTime.UtcNow;
+        return endUtc > startUtc
+               && endUtc - startUtc <= MaxProgrammeLength
+               && startUtc <= now
+               && startUtc >= now.AddDays(-31);
+    }
+
     /// <summary>This server as its own ffmpeg reaches it (port and base URL from the server's
     /// configuration; plain HTTP, since a local certificate is rarely valid for 127.0.0.1).</summary>
     public string LocalBaseUrl => _appHost.GetApiUrlForLocalAccess(null, false).TrimEnd('/');
@@ -131,6 +145,11 @@ public sealed class CatchupService
     /// </summary>
     public async Task<MediaSourceInfo?> GetPlaybackSourceAsync(Guid channelId, DateTime startUtc, DateTime endUtc, Guid userId, CancellationToken ct)
     {
+        if (!IsPlausibleSpan(startUtc, endUtc))
+        {
+            return null;
+        }
+
         var cc = (await GetCatchupChannelsAsync(ct).ConfigureAwait(false)).FirstOrDefault(c => c.ChannelId == channelId);
         var providerOk = cc is not null && startUtc >= DateTime.UtcNow.AddDays(-cc.CatchupDays);
         var finished = endUtc + CatchupJobManager.Tail < DateTime.UtcNow;
@@ -324,6 +343,11 @@ public sealed class CatchupService
     /// <summary>Recording first, provider catch-up second.</summary>
     public async Task<ResolveResult?> ResolveAsync(Guid channelId, DateTime startUtc, DateTime endUtc, Guid userId, double offsetSeconds, CancellationToken ct)
     {
+        if (!IsPlausibleSpan(startUtc, endUtc))
+        {
+            return null;
+        }
+
         var recordings = await GetRecordingsAsync(userId, ct).ConfigureAwait(false);
         var title = await FindTitleAsync(channelId, startUtc, ct).ConfigureAwait(false);
         var rec = MatchRecording(recordings, channelId, startUtc, endUtc, title);
