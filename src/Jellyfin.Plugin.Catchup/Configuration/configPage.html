@@ -54,6 +54,11 @@
                     <input id="LookbackHours" name="LookbackHours" type="number" min="1" max="168" is="emby-input" />
                 </div>
                 <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="ArchiveTimeZone">Archive time zone</label>
+                    <input id="ArchiveTimeZone" name="ArchiveTimeZone" type="text" is="emby-input" />
+                    <div class="fieldDescription">Only if replays start an hour or two off: the zone the provider's archive really uses, e.g. Europe/Zurich. Empty = as the provider reports.</div>
+                </div>
+                <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="CacheDirectory">Cache directory</label>
                     <input id="CacheDirectory" name="CacheDirectory" type="text" is="emby-input" />
                     <div class="fieldDescription">Where catch-up segments are kept, as the Jellyfin server sees the path. A hard disk is fine; about 3.5 GB per hour of HD.</div>
@@ -100,6 +105,7 @@
                     page.querySelector('#LookbackHours').value = c.LookbackHours || 72;
                     page.querySelector('#EnableProviderCatchup').checked = c.EnableProviderCatchup !== false;
                     page.querySelector('#CacheDirectory').value = c.CacheDirectory || '';
+                    page.querySelector('#ArchiveTimeZone').value = c.ArchiveTimeZone || '';
                     page.querySelector('#CacheLimitGb').value = c.CacheLimitGb || 30;
                     Dashboard.hideLoadingMsg();
                     status();
@@ -120,6 +126,7 @@
                     c.EnableProviderCatchup = page.querySelector('#EnableProviderCatchup').checked;
                     c.CacheDirectory = page.querySelector('#CacheDirectory').value.trim() || c.CacheDirectory;
                     c.CacheLimitGb = parseInt(page.querySelector('#CacheLimitGb').value, 10) || 30;
+                    c.ArchiveTimeZone = page.querySelector('#ArchiveTimeZone').value.trim();
                     ApiClient.updatePluginConfiguration(pluginId, c).then(function (r) {
                         Dashboard.processPluginConfigurationUpdateResult(r);
                         status();

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -232,6 +232,12 @@ public sealed class XtreamClient : ICatchupBackend
         }
 
         var toServerTime = _channels?.ToServerTime ?? (utc => utc);
+        if (ArchiveTime.Zone is { } zone)
+        {
+            // the account reports one zone and indexes its archive in another
+            toServerTime = utc => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), zone);
+        }
+
         var start = toServerTime(startUtc).ToString("yyyy-MM-dd':'HH-mm", CultureInfo.InvariantCulture);
         var url = $"{BaseUrl}/timeshift/{Uri.EscapeDataString(Config.XtreamUsername)}/{Uri.EscapeDataString(Config.XtreamPassword)}/" +
                   $"{durationMinutes.ToString(CultureInfo.InvariantCulture)}/{start}/{streamId.ToString(CultureInfo.InvariantCulture)}.ts";

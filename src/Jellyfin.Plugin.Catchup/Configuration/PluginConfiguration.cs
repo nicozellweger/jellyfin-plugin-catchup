@@ -38,4 +38,10 @@ public class PluginConfiguration : BasePluginConfiguration
     public string XtreamUsername { get; set; } = string.Empty;
 
     public string XtreamPassword { get; set; } = string.Empty;
+
+    /// <summary>
+    /// IANA time zone the provider's archive is indexed in (e.g. Europe/Zurich), when the provider
+    /// reports another one than it uses. Empty = trust what the provider/backend reports.
+    /// </summary>
+    public string ArchiveTimeZone { get; set; } = string.Empty;
 }

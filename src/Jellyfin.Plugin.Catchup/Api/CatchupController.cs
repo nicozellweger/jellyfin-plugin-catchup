@@ -144,6 +144,7 @@ public class CatchupController : ControllerBase
             result.StreamPath,
             result.DurationSeconds,
             result.ItemStartUtc,
+            Next = await FollowingAsync(channelId, endDate.ToUniversalTime(), ct).ConfigureAwait(false),
         });
     }
 
@@ -206,6 +207,55 @@ public class CatchupController : ControllerBase
 
         Response.Headers.CacheControl = "private, max-age=3600";
         return PhysicalFile(path, "video/mp2t", enableRangeProcessing: true);
+    }
+
+    /// <summary>
+    /// The programmes that followed on the channel and can be played (recording or catch-up), in order
+    /// and without a gap, so a client can queue them: watching runs on into the next programme like it
+    /// does on air. Nothing is downloaded for them until they are played.
+    /// </summary>
+    private async Task<IReadOnlyList<object>> FollowingAsync(Guid channelId, DateTime endUtc, CancellationToken ct)
+    {
+        var list = new List<object>();
+        try
+        {
+            var following = await _service.GetProgrammesAsync(new[] { channelId }, endUtc.AddMinutes(-1), endUtc.AddHours(8), CurrentUserId(), ct).ConfigureAwait(false);
+            var expected = endUtc;
+            foreach (var p in following.Where(p => p.StartDate >= endUtc.AddMinutes(-2)).OrderBy(p => p.StartDate).Take(4))
+            {
+                if (Math.Abs((p.StartDate - expected).TotalMinutes) > 5 || !CatchupService.IsPlausibleSpan(p.StartDate, p.EndDate))
+                {
+                    break; // a hole in the guide: stop rather than jump over it
+                }
+
+                var id = p.RecordingId;
+                if (id is null && p.HasProviderCatchup)
+                {
+                    id = (await ReplayChannel.FindOrCreateItemAsync(_libraryManager, _channelManager, channelId, p.StartDate, p.EndDate, ct).ConfigureAwait(false))?.Id;
+                }
+
+                if (id is null)
+                {
+                    break;
+                }
+
+                list.Add(new
+                {
+                    ItemId = id.Value.ToString("N"),
+                    Kind = p.RecordingId is null ? "catchup" : "recording",
+                    p.Name,
+                    StartDate = p.StartDate.ToString("o", CultureInfo.InvariantCulture),
+                    EndDate = p.EndDate.ToString("o", CultureInfo.InvariantCulture),
+                });
+                expected = p.EndDate;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "[Catch-up] Following programmes not available");
+        }
+
+        return list;
     }
 
     /// <summary>

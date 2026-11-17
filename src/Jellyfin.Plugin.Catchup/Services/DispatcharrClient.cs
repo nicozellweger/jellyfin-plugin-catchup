@@ -137,7 +137,7 @@ public sealed class DispatcharrClient : ICatchupBackend
         var body = new
         {
             channel_uuid = channelUuid,
-            start = startUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+            start = ArchiveTime.AsIfUtc(startUtc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
             duration = durationMinutes,
         };
         using var response = await client.PostAsJsonAsync($"{BaseUrl}/api/catchup/sessions/", body, ct).ConfigureAwait(false);
