@@ -107,6 +107,10 @@ public class CatchupController : ControllerBase
         {
             return Conflict(new { Error = "busy" });
         }
+        catch (CatchupUnavailableException)
+        {
+            return NotFound(new { Error = "not_in_archive" });
+        }
         catch (HttpRequestException ex)
         {
             _logger.LogWarning(ex, "[Catch-up] Provider refused catch-up");

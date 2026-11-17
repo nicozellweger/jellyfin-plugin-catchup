@@ -54,6 +54,12 @@ public sealed class CatchupJob
     /// <summary>When a viewer last opened this programme. The most recently opened one owns the connection.</summary>
     internal DateTime OpenedUtc { get; set; }
 
+    /// <summary>Set when the provider answered that it does not have this stretch (a client error,
+    /// not "busy"). Until then nothing is asked again and readers are told at once.</summary>
+    internal DateTime UnavailableUntilUtc { get; set; }
+
+    internal bool Unavailable => DateTime.UtcNow < UnavailableUntilUtc;
+
     /// <summary>When the running chunk was started (for the download speed).</summary>
     internal DateTime ChunkStartedUtc { get; set; }
 
@@ -99,6 +105,14 @@ public sealed class CatchupJob
     public double TotalSeconds => (EndUtc - StartUtc + CatchupJobManager.Tail).TotalSeconds;
 }
 
+/// <summary>Thrown when the provider does not have the requested stretch in its archive.</summary>
+public sealed class CatchupUnavailableException : Exception
+{
+    public CatchupUnavailableException(string message) : base(message)
+    {
+    }
+}
+
 /// <summary>Thrown when the provider connection for catch-up is in use by another viewer.</summary>
 public sealed class CatchupBusyException : Exception
 {
@@ -119,6 +133,9 @@ public sealed class CatchupJobManager : IDisposable
     public static readonly TimeSpan Tail = TimeSpan.FromMinutes(5);
 
     private const int RestartAlignSegments = 10;   // provider timeshift works in whole minutes
+    // providers refuse very long archive requests (250 min was answered with 400); longer programmes
+    // continue with the next request when the reader gets there
+    private const int MaxChunkMinutes = 120;
     // A slot the writer reaches within this time is waited for; anything further restarts the download
     // at the slot (a restart costs about 5 s). Measured, because providers deliver anywhere between
     // 8x and 25x real time. Jellyfin's remuxer reads just ahead of the writer and must not trigger restarts.
@@ -224,7 +241,43 @@ public sealed class CatchupJobManager : IDisposable
             throw;
         }
 
+        if (offsetSeconds is not null)
+        {
+            await WaitForFirstDataAsync(job, ct).ConfigureAwait(false);
+        }
+
         return job;
+    }
+
+    /// <summary>
+    /// A provider that does not have a stretch says so within two or three seconds. Waiting that long
+    /// before answering the client lets it show "not available" instead of opening a player that then
+    /// has nothing to play. When data flows, this returns as soon as the first bytes are on disk.
+    /// </summary>
+    private static async Task WaitForFirstDataAsync(CatchupJob job, CancellationToken ct)
+    {
+        var until = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < until)
+        {
+            if (job.Unavailable)
+            {
+                throw new CatchupUnavailableException("The provider has no archive for this time.");
+            }
+
+            try
+            {
+                if (System.IO.Directory.EnumerateFiles(job.Directory, "seg_*").Any())
+                {
+                    return;
+                }
+            }
+            catch (IOException)
+            {
+                return;
+            }
+
+            await Task.Delay(100, ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Segments currently offered in the playlist (time-limited for a programme that is still airing).</summary>
@@ -308,6 +361,11 @@ public sealed class CatchupJobManager : IDisposable
 
         var until = due > now + TimeSpan.FromSeconds(30) ? due : now + TimeSpan.FromSeconds(30);
 
+        if (job.Unavailable)
+        {
+            return null;
+        }
+
         await EnsureProducingAsync(job, index, ct).ConfigureAwait(false);
         var idleSince = DateTime.MaxValue;
         var checkedAt = DateTime.UtcNow;
@@ -316,6 +374,11 @@ public sealed class CatchupJobManager : IDisposable
             if (File.Exists(path))
             {
                 return path;
+            }
+
+            if (job.Unavailable)
+            {
+                return null;
             }
 
             if (job.Downloading)
@@ -352,7 +415,7 @@ public sealed class CatchupJobManager : IDisposable
         await job.Gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (File.Exists(job.SegmentPath(index)))
+            if (File.Exists(job.SegmentPath(index)) || job.Unavailable)
             {
                 return;
             }
@@ -445,6 +508,11 @@ public sealed class CatchupJobManager : IDisposable
             var remaining = stop >= job.TotalSegments
                 ? (int)Math.Ceiling(job.TotalSeconds - (startSegment * SegmentSeconds))
                 : (stop - startSegment) * SegmentSeconds;
+            if (remaining > MaxChunkMinutes * 60)
+            {
+                remaining = MaxChunkMinutes * 60;
+            }
+
             var minutes = Math.Max(1, (int)Math.Ceiling(remaining / 60.0));
             BackendSession session;
             try
@@ -492,7 +560,18 @@ public sealed class CatchupJobManager : IDisposable
                      "-protocol_whitelist", "http,https,tcp,tls,crypto",
                      "-i", inputUrl,
                      "-map", "0:v:0?", "-map", "0:a?",
-                     "-c", "copy",
+                     // Video is copied. Audio is re-encoded with its gaps filled by silence: broadcasters
+                     // switch format in ad and trailer blocks, and the audio then drops out of the stream
+                     // for up to half a minute. A copy keeps that hole, and a player (and Jellyfin's
+                     // remuxer) waits for audio that never comes: playback hangs right there.
+                     "-c:v", "copy",
+                     "-c:a", "ac3", "-b:a", "384k",
+                     "-af", "aresample=async=1000:min_hard_comp=0.3",
+                     // The silence for a gap only exists once real audio returns, i.e. up to half a minute
+                     // late. Let the muxer hold the video back that long, so every segment carries the
+                     // audio that belongs to it.
+                     "-max_interleave_delta", "120000000",
+                     "-max_muxing_queue_size", "9999",
                      "-t", seconds.ToString(CultureInfo.InvariantCulture),
                      "-output_ts_offset", (startSegment * SegmentSeconds).ToString(CultureInfo.InvariantCulture),
                      "-f", "hls",
@@ -540,6 +619,15 @@ public sealed class CatchupJobManager : IDisposable
 
             if (!ReferenceEquals(job.Process, process) || job.StoppedOnPurpose || DateTime.UtcNow - job.LastAccessUtc > OwnerIdle)
             {
+                return;
+            }
+
+            // "Bad Request", "Not Found", "Forbidden": the archive does not have this stretch. Asking again
+            // changes nothing, and every attempt costs the viewer seconds in front of a black screen.
+            if (code != 0 && HighestWritten(job) < startSegment && IsClientError(job.LastError))
+            {
+                job.UnavailableUntilUtc = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+                _logger.LogInformation("[Catch-up] Job {Job}: the provider has no archive for this time", job.Id);
                 return;
             }
 
@@ -719,6 +807,10 @@ public sealed class CatchupJobManager : IDisposable
             _logger.LogDebug(ex, "[Catch-up] Could not delete {Dir}", dir);
         }
     }
+
+    private static bool IsClientError(string? ffmpegError) =>
+        ffmpegError is not null
+        && System.Text.RegularExpressions.Regex.IsMatch(ffmpegError, "Server returned 4(00|03|04|10|XX)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     /// <summary>ffmpeg names its input in error messages; stream URLs can carry account credentials.</summary>
     private static string Redact(string s)

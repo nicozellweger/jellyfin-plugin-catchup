@@ -91,7 +91,7 @@ public sealed class CatchupService
 
     private sealed record StoredLayout(Guid Channel, List<MediaStream> Streams, int? Bitrate, DateTime At);
 
-    private static string LayoutFile => Path.Combine(Config.CacheDirectory, "layouts.json");
+    private static string LayoutFile => Path.Combine(Config.CacheDirectory, "layouts-v2.json");
 
     /// <summary>Layouts survive a server restart, so the first start per channel is not slow again.</summary>
     private void LoadLayouts()
@@ -175,6 +175,10 @@ public sealed class CatchupService
         }
 
         var job = await _jobs.OpenAsync(cc!.BackendUuid, startUtc, endUtc, userId, null, ct).ConfigureAwait(false);
+        if (job.Unavailable)
+        {
+            return null;
+        }
 
         // Stream layout (codecs, audio tracks) is a property of the channel, not of the programme:
         // probe it once per channel and reuse it, so later starts answer at once while the
