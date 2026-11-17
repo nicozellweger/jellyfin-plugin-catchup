@@ -51,7 +51,7 @@ public class CatchupController : ControllerBase
         {
             Version = typeof(CatchupController).Assembly.GetName().Version?.ToString(),
             Recordings = true,
-            ProviderCatchup = DispatcharrClient.IsConfigured,
+            ProviderCatchup = _service.Backend.IsConfigured,
             Error = error,
             Channels = channels.Select(c => new { ChannelId = c.ChannelId.ToString("N"), c.Number, c.Name, c.CatchupDays }),
         });
@@ -149,6 +149,11 @@ public class CatchupController : ControllerBase
     [AllowAnonymous]
     public ActionResult Playlist([FromRoute] string jobId, [FromQuery] double? offset)
     {
+        if (!StreamAccessAllowed())
+        {
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
         var job = _service.Jobs.Get(jobId);
         if (job is null)
         {
@@ -164,6 +169,11 @@ public class CatchupController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult> Segment([FromRoute] string jobId, [FromRoute] string segment, CancellationToken ct)
     {
+        if (!StreamAccessAllowed())
+        {
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
         var job = _service.Jobs.Get(jobId);
         if (job is null || !TryParseSegment(segment, out var index))
         {
@@ -192,6 +202,17 @@ public class CatchupController : ControllerBase
 
         Response.Headers.CacheControl = "private, max-age=3600";
         return PhysicalFile(path, "video/mp2t", enableRangeProcessing: true);
+    }
+
+    /// <summary>
+    /// The stream endpoints carry no token because the server's own ffmpeg reads them. That is the
+    /// only caller that needs to get in without one: everything else has to be signed in.
+    /// </summary>
+    private bool StreamAccessAllowed()
+    {
+        var remote = HttpContext.Connection.RemoteIpAddress;
+        return (remote is not null && System.Net.IPAddress.IsLoopback(remote))
+               || User.Identity?.IsAuthenticated == true;
     }
 
     private static bool TryParseSegment(string name, out int index)

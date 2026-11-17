@@ -1,4 +1,4 @@
-using Jellyfin.Plugin.Catchup.Services;
+﻿using Jellyfin.Plugin.Catchup.Services;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,7 +15,8 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
             c.Timeout = Timeout.InfiniteTimeSpan; // streams run as long as playback lasts
             c.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-Catchup/0.1");
         });
-        serviceCollection.AddSingleton<DispatcharrClient>();
+        // the catch-up source; replace or extend here to support another backend
+        serviceCollection.AddSingleton<ICatchupBackend, DispatcharrClient>();
         serviceCollection.AddSingleton<CatchupJobManager>();
         serviceCollection.AddSingleton<CatchupService>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Channels.IChannel, Channels.ReplayChannel>();

@@ -38,19 +38,21 @@ public sealed class CatchupService
 {
     private readonly ILibraryManager _libraryManager;
     private readonly ILiveTvManager _liveTvManager;
-    private readonly DispatcharrClient _backend;
+    private readonly ICatchupBackend _backend;
     private readonly CatchupJobManager _jobs;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly IMediaSourceManager _mediaSourceManager;
+    private readonly MediaBrowser.Controller.IServerApplicationHost _appHost;
     private readonly ILogger<CatchupService> _logger;
 
     public CatchupService(
         ILibraryManager libraryManager,
         ILiveTvManager liveTvManager,
-        DispatcharrClient backend,
+        ICatchupBackend backend,
         CatchupJobManager jobs,
         IMediaEncoder mediaEncoder,
         IMediaSourceManager mediaSourceManager,
+        MediaBrowser.Controller.IServerApplicationHost appHost,
         ILogger<CatchupService> logger)
     {
         _libraryManager = libraryManager;
@@ -59,10 +61,15 @@ public sealed class CatchupService
         _jobs = jobs;
         _mediaEncoder = mediaEncoder;
         _mediaSourceManager = mediaSourceManager;
+        _appHost = appHost;
         _logger = logger;
     }
 
     public CatchupJobManager Jobs => _jobs;
+
+    /// <summary>This server as its own ffmpeg reaches it (port and base URL from the server's
+    /// configuration; plain HTTP, since a local certificate is rarely valid for 127.0.0.1).</summary>
+    public string LocalBaseUrl => _appHost.GetApiUrlForLocalAccess(null, false).TrimEnd('/');
 
     // a channel's codecs and audio tracks change rarely; a wrong guess only costs a transcode decision
     private static readonly TimeSpan LayoutTtl = TimeSpan.FromDays(7);
@@ -179,7 +186,7 @@ public sealed class CatchupService
         return new MediaSourceInfo
         {
             Name = "Replay",
-            Path = $"http://127.0.0.1:8096/Catchup/Hls/{job.Id}/index.m3u8",
+            Path = $"{LocalBaseUrl}/Catchup/Hls/{job.Id}/index.m3u8",
             Protocol = MediaProtocol.Http,
             Container = "hls",
             Type = MediaSourceType.Default,
@@ -204,7 +211,7 @@ public sealed class CatchupService
     /// <summary>Jellyfin channels joined to backend channels by channel number.</summary>
     public async Task<IReadOnlyList<CatchupChannel>> GetCatchupChannelsAsync(CancellationToken ct)
     {
-        if (!Config.EnableProviderCatchup || !DispatcharrClient.IsConfigured)
+        if (!Config.EnableProviderCatchup || !_backend.IsConfigured)
         {
             return Array.Empty<CatchupChannel>();
         }
@@ -316,9 +323,9 @@ public sealed class CatchupService
         return new ResolveResult("catchup", null, path, job.TotalSeconds);
     }
 
-    public DispatcharrClient Backend => _backend;
+    public ICatchupBackend Backend => _backend;
 
-    private static bool IsBackendUsable => Config.EnableProviderCatchup && DispatcharrClient.IsConfigured;
+    private bool IsBackendUsable => Config.EnableProviderCatchup && _backend.IsConfigured;
 
     private static string ProgrammeId(Guid channelId, DateTime startUtc) => $"{channelId:N}_{startUtc:yyyyMMddHHmm}";
 

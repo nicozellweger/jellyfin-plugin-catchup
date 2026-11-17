@@ -130,13 +130,13 @@ public sealed class CatchupJobManager : IDisposable
     // nobody asked for this long: the viewer is gone, stop downloading and free the provider connection
     private static readonly TimeSpan DownloadIdle = TimeSpan.FromSeconds(90);
 
-    private readonly DispatcharrClient _backend;
+    private readonly ICatchupBackend _backend;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly ILogger<CatchupJobManager> _logger;
     private readonly ConcurrentDictionary<string, CatchupJob> _jobs = new();
     private readonly SemaphoreSlim _connection = new(1, 1);
 
-    public CatchupJobManager(DispatcharrClient backend, IMediaEncoder mediaEncoder, ILogger<CatchupJobManager> logger)
+    public CatchupJobManager(ICatchupBackend backend, IMediaEncoder mediaEncoder, ILogger<CatchupJobManager> logger)
     {
         _backend = backend;
         _mediaEncoder = mediaEncoder;

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -19,7 +19,7 @@ public sealed record BackendProgramme(string ChannelNumber, DateTime StartUtc, D
 public sealed record BackendSession(string SessionId, string PlaybackUrl, DateTime ExpiresUtc);
 
 /// <summary>Talks to Dispatcharr's REST API and XMLTV output. Results are cached briefly.</summary>
-public sealed class DispatcharrClient
+public sealed class DispatcharrClient : ICatchupBackend
 {
     public const string HttpClientName = "Catchup.Dispatcharr";
 
@@ -43,7 +43,7 @@ public sealed class DispatcharrClient
 
     private static string BaseUrl => Config.DispatcharrUrl.TrimEnd('/');
 
-    public static bool IsConfigured =>
+    public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(Config.DispatcharrUrl) && !string.IsNullOrWhiteSpace(Config.DispatcharrApiKey);
 
     private HttpClient CreateClient(bool withApiKey)

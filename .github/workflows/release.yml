@@ -1,0 +1,49 @@
+name: release
+
+# Tag vX.Y.Z -> build, GitHub release with the plugin zip, and an updated
+# manifest.json on main that Jellyfin reads as a plugin repository.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Version from tag
+        id: v
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        run: |
+          git checkout "$GITHUB_REF_NAME" -- src
+          dotnet publish src/Jellyfin.Plugin.Catchup -c Release -o out --nologo \
+            -p:Version=${{ steps.v.outputs.version }} \
+            -p:AssemblyVersion=${{ steps.v.outputs.version }}.0 \
+            -p:FileVersion=${{ steps.v.outputs.version }}.0
+      - name: Package and manifest
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: python3 .github/scripts/package.py
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip --title "Catch-up ${{ steps.v.outputs.version }}" --generate-notes
+      - name: Publish manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "Manifest: ${{ steps.v.outputs.version }}"
+          git push origin main

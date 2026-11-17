@@ -289,5 +289,5 @@ public sealed class ReplayChannel : IChannel, IRequiresMediaInfoCallback, IHasCa
         }
     }
 
-    private static string LocalImageUrl(Guid channelId) => $"http://127.0.0.1:8096/Items/{channelId:N}/Images/Primary";
+    private string LocalImageUrl(Guid channelId) => $"{_service.LocalBaseUrl}/Items/{channelId:N}/Images/Primary";
 }

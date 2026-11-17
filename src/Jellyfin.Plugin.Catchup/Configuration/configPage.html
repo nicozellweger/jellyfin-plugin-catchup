@@ -25,11 +25,21 @@
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="DispatcharrProfile">Channel profile</label>
                     <input id="DispatcharrProfile" name="DispatcharrProfile" type="text" is="emby-input" />
-                    <div class="fieldDescription">Same profile Jellyfin's tuner uses (e.g. Nicoflix). Empty = default.</div>
+                    <div class="fieldDescription">The Dispatcharr channel profile Jellyfin's tuner uses. Empty = default.</div>
                 </div>
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="LookbackHours">Look back (hours)</label>
                     <input id="LookbackHours" name="LookbackHours" type="number" min="1" max="168" is="emby-input" />
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="CacheDirectory">Cache directory</label>
+                    <input id="CacheDirectory" name="CacheDirectory" type="text" is="emby-input" />
+                    <div class="fieldDescription">Where catch-up segments are kept, as the Jellyfin server sees the path. A hard disk is fine; about 3.5 GB per hour of HD.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="CacheLimitGb">Cache limit (GB)</label>
+                    <input id="CacheLimitGb" name="CacheLimitGb" type="number" min="1" max="2000" is="emby-input" />
+                    <div class="fieldDescription">Programmes watched longest ago are removed first; unused ones after 6 hours.</div>
                 </div>
                 <div class="checkboxContainer">
                     <label>
@@ -63,6 +73,8 @@
                     page.querySelector('#DispatcharrProfile').value = c.DispatcharrProfile || '';
                     page.querySelector('#LookbackHours').value = c.LookbackHours || 72;
                     page.querySelector('#EnableProviderCatchup').checked = c.EnableProviderCatchup !== false;
+                    page.querySelector('#CacheDirectory').value = c.CacheDirectory || '';
+                    page.querySelector('#CacheLimitGb').value = c.CacheLimitGb || 30;
                     Dashboard.hideLoadingMsg();
                     status();
                 });
@@ -76,6 +88,8 @@
                     c.DispatcharrProfile = page.querySelector('#DispatcharrProfile').value.trim();
                     c.LookbackHours = parseInt(page.querySelector('#LookbackHours').value, 10) || 72;
                     c.EnableProviderCatchup = page.querySelector('#EnableProviderCatchup').checked;
+                    c.CacheDirectory = page.querySelector('#CacheDirectory').value.trim() || c.CacheDirectory;
+                    c.CacheLimitGb = parseInt(page.querySelector('#CacheLimitGb').value, 10) || 30;
                     ApiClient.updatePluginConfiguration(pluginId, c).then(function (r) {
                         Dashboard.processPluginConfigurationUpdateResult(r);
                         status();
