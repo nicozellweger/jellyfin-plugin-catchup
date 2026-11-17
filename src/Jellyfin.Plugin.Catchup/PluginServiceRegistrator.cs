@@ -16,7 +16,9 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
             c.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-Catchup/0.1");
         });
         // the catch-up source; replace or extend here to support another backend
-        serviceCollection.AddSingleton<ICatchupBackend, DispatcharrClient>();
+        serviceCollection.AddSingleton<DispatcharrClient>();
+        serviceCollection.AddSingleton<XtreamClient>();
+        serviceCollection.AddSingleton<ICatchupBackend, SelectedBackend>();
         serviceCollection.AddSingleton<CatchupJobManager>();
         serviceCollection.AddSingleton<CatchupService>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Channels.IChannel, Channels.ReplayChannel>();

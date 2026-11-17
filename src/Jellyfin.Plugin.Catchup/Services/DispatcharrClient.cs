@@ -96,7 +96,7 @@ public sealed class DispatcharrClient : ICatchupBackend
     }
 
     /// <summary>Guide programmes including the past <paramref name="prevDays"/> days.</summary>
-    public async Task<IReadOnlyList<BackendProgramme>> GetGuideAsync(int prevDays, CancellationToken ct)
+    public async Task<IReadOnlyList<BackendProgramme>> GetGuideAsync(int prevDays, IReadOnlyCollection<BackendChannel> channels, CancellationToken ct)
     {
         if (_guide is { } cached && cached.PrevDays >= prevDays && DateTime.UtcNow - cached.At < GuideCacheTtl)
         {

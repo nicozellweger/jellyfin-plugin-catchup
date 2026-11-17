@@ -1,4 +1,4 @@
-using MediaBrowser.Model.Plugins;
+﻿using MediaBrowser.Model.Plugins;
 
 namespace Jellyfin.Plugin.Catchup.Configuration;
 
@@ -28,4 +28,14 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Maximum size of the catch-up cache in GB (oldest finished downloads are removed first).</summary>
     public int CacheLimitGb { get; set; } = 30;
+
+    /// <summary>Where provider catch-up comes from: "dispatcharr" or "xtream".</summary>
+    public string Backend { get; set; } = "dispatcharr";
+
+    /// <summary>Xtream Codes server, e.g. http://provider.example:8080</summary>
+    public string XtreamUrl { get; set; } = string.Empty;
+
+    public string XtreamUsername { get; set; } = string.Empty;
+
+    public string XtreamPassword { get; set; } = string.Empty;
 }

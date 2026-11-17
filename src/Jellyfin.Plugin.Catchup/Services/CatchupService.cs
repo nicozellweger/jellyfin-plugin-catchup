@@ -208,7 +208,35 @@ public sealed class CatchupService
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
-    /// <summary>Jellyfin channels joined to backend channels by channel number.</summary>
+    /// <summary>
+    /// Jellyfin channels joined to backend channels: by channel number where the backend has real
+    /// numbers, else by name (a provider playlist carries names, not the provider's numbering).
+    /// Where several backend channels fit, one with catch-up wins.
+    /// </summary>
+    private async Task<Dictionary<Guid, BackendChannel>> MapChannelsAsync(CancellationToken ct)
+    {
+        var all = await _backend.GetChannelsAsync(ct).ConfigureAwait(false);
+        var byNumber = all.Where(c => c.Number.Length > 0)
+            .GroupBy(c => c.Number)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(c => c.IsCatchup).First());
+        var byName = all.Where(c => Normalize(c.Name).Length > 0)
+            .GroupBy(c => Normalize(c.Name))
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(c => c.IsCatchup).First());
+
+        var map = new Dictionary<Guid, BackendChannel>();
+        foreach (var channel in GetJellyfinChannels())
+        {
+            var number = DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty);
+            if ((number.Length > 0 && byNumber.TryGetValue(number, out var b)) || byName.TryGetValue(Normalize(channel.Name), out b))
+            {
+                map[channel.Id] = b;
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>Jellyfin channels that have provider catch-up.</summary>
     public async Task<IReadOnlyList<CatchupChannel>> GetCatchupChannelsAsync(CancellationToken ct)
     {
         if (!Config.EnableProviderCatchup || !_backend.IsConfigured)
@@ -216,18 +244,13 @@ public sealed class CatchupService
             return Array.Empty<CatchupChannel>();
         }
 
-        var backend = (await _backend.GetChannelsAsync(ct).ConfigureAwait(false))
-            .Where(c => c.IsCatchup && c.CatchupDays > 0 && c.Number.Length > 0)
-            .GroupBy(c => c.Number)
-            .ToDictionary(g => g.Key, g => g.First());
-
+        var map = await MapChannelsAsync(ct).ConfigureAwait(false);
         var result = new List<CatchupChannel>();
         foreach (var channel in GetJellyfinChannels())
         {
-            var number = DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty);
-            if (backend.TryGetValue(number, out var b))
+            if (map.TryGetValue(channel.Id, out var b) && b.IsCatchup && b.CatchupDays > 0)
             {
-                result.Add(new CatchupChannel(channel.Id, number, channel.Name, b.Uuid, b.CatchupDays));
+                result.Add(new CatchupChannel(channel.Id, DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty), channel.Name, b.Uuid, b.CatchupDays));
             }
         }
 
@@ -254,13 +277,16 @@ public sealed class CatchupService
         var recordings = await GetRecordingsAsync(userId, ct).ConfigureAwait(false);
 
         var prevDays = (int)Math.Ceiling((now - fromUtc).TotalDays) + 1;
-        var guide = IsBackendUsable ? await _backend.GetGuideAsync(prevDays, ct).ConfigureAwait(false) : Array.Empty<BackendProgramme>();
+        var map = IsBackendUsable ? await MapChannelsAsync(ct).ConfigureAwait(false) : new Dictionary<Guid, BackendChannel>();
+        var asked = channels.Where(c => map.ContainsKey(c.Id)).Select(c => map[c.Id]).ToList();
+        var guide = IsBackendUsable ? await _backend.GetGuideAsync(prevDays, asked, ct).ConfigureAwait(false) : Array.Empty<BackendProgramme>();
         var byNumber = guide.ToLookup(p => p.ChannelNumber);
 
         var list = new List<CatchupProgramme>();
         foreach (var channel in channels)
         {
-            var number = DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty);
+            // the backend's own key for this channel; its programmes carry the same one
+            var number = map.TryGetValue(channel.Id, out var mapped) ? mapped.Number : DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty);
             catchup.TryGetValue(channel.Id, out var cc);
             var providerFloor = cc is null ? DateTime.MaxValue : now.AddDays(-cc.CatchupDays);
 
@@ -344,11 +370,13 @@ public sealed class CatchupService
             return null;
         }
 
-        var number = DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty);
         var prevDays = (int)Math.Ceiling((DateTime.UtcNow - startUtc).TotalDays) + 1;
         try
         {
-            var guide = await _backend.GetGuideAsync(Math.Max(1, prevDays), ct).ConfigureAwait(false);
+            var map = await MapChannelsAsync(ct).ConfigureAwait(false);
+            var mapped = map.TryGetValue(channelId, out var b) ? b : null;
+            var number = mapped?.Number ?? DispatcharrClient.NormalizeNumber(channel.Number ?? string.Empty);
+            var guide = await _backend.GetGuideAsync(Math.Max(1, prevDays), mapped is null ? Array.Empty<BackendChannel>() : new[] { mapped }, ct).ConfigureAwait(false);
             return guide.FirstOrDefault(p => p.ChannelNumber == number && Math.Abs((p.StartUtc - startUtc).TotalMinutes) < 2)?.Title;
         }
         catch (Exception ex)

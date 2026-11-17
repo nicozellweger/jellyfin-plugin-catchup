@@ -510,7 +510,7 @@ public sealed class CatchupJobManager : IDisposable
         };
         process.Exited += (_, _) =>
         {
-            job.LastError = stderr.Length > 0 ? stderr.ToString() : null;
+            job.LastError = stderr.Length > 0 ? Redact(stderr.ToString()) : null;
             int code;
             try
             {
@@ -710,6 +710,13 @@ public sealed class CatchupJobManager : IDisposable
         {
             _logger.LogDebug(ex, "[Catch-up] Could not delete {Dir}", dir);
         }
+    }
+
+    /// <summary>ffmpeg names its input in error messages; stream URLs can carry account credentials.</summary>
+    private static string Redact(string s)
+    {
+        s = System.Text.RegularExpressions.Regex.Replace(s, "(/timeshift/)[^/\\s]+/[^/\\s]+/", "$1***/***/");
+        return System.Text.RegularExpressions.Regex.Replace(s, "((?:username|password|token|api_key)=)[^&\\s]+", "$1***", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
     private static string Truncate(string? s, int n) => s is null ? string.Empty : (s.Length <= n ? s : s[..n]);

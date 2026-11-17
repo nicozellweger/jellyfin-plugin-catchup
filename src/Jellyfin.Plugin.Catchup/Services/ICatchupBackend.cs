@@ -16,11 +16,13 @@ public interface ICatchupBackend
     bool IsConfigured { get; }
 
     /// <summary>Channels the backend knows, with their catch-up capability. Matched to Jellyfin's
-    /// Live TV channels by channel number.</summary>
+    /// Live TV channels by channel number, else by name. <see cref="BackendChannel.Number"/> is also the
+    /// key the backend's programmes carry (<see cref="BackendProgramme.ChannelNumber"/>).</summary>
     Task<IReadOnlyList<BackendChannel>> GetChannelsAsync(CancellationToken ct);
 
-    /// <summary>What aired during the last <paramref name="prevDays"/> days (Jellyfin forgets past programmes).</summary>
-    Task<IReadOnlyList<BackendProgramme>> GetGuideAsync(int prevDays, CancellationToken ct);
+    /// <summary>What aired during the last <paramref name="prevDays"/> days (Jellyfin forgets past programmes).
+    /// <paramref name="channels"/> are the backend channels Jellyfin has, for backends that ask per channel.</summary>
+    Task<IReadOnlyList<BackendProgramme>> GetGuideAsync(int prevDays, IReadOnlyCollection<BackendChannel> channels, CancellationToken ct);
 
     /// <summary>A stream URL (any container ffmpeg reads) of the channel starting at
     /// <paramref name="startUtc"/> and lasting <paramref name="durationMinutes"/>.</summary>

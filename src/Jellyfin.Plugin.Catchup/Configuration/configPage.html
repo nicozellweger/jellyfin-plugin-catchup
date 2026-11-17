@@ -12,6 +12,28 @@
                 <h2 class="sectionTitle">Catch-up</h2>
                 <p>Start-over and replay for Live TV. Programmes with a recording play from the recording; otherwise the IPTV backend's catch-up is used.</p>
 
+                <div class="selectContainer">
+                    <label class="selectLabel" for="Backend">Catch-up source</label>
+                    <select is="emby-select" id="Backend" name="Backend">
+                        <option value="dispatcharr">Dispatcharr</option>
+                        <option value="xtream">Xtream Codes account (directly)</option>
+                    </select>
+                    <div class="fieldDescription">Where provider catch-up comes from. Start-over from recordings works without any source.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="XtreamUrl">Xtream server</label>
+                    <input id="XtreamUrl" name="XtreamUrl" type="text" is="emby-input" />
+                    <div class="fieldDescription">Only for the Xtream source, e.g. http://provider.example:8080. Channels are matched to Jellyfin by name.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="XtreamUsername">Xtream username</label>
+                    <input id="XtreamUsername" name="XtreamUsername" type="text" is="emby-input" autocomplete="off" />
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="XtreamPassword">Xtream password</label>
+                    <input id="XtreamPassword" name="XtreamPassword" type="password" is="emby-input" autocomplete="off" />
+                    <div class="fieldDescription">Stored on the server only.</div>
+                </div>
                 <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="DispatcharrUrl">Dispatcharr URL</label>
                     <input id="DispatcharrUrl" name="DispatcharrUrl" type="text" is="emby-input" />
@@ -68,6 +90,10 @@
             page.addEventListener('pageshow', function () {
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
+                    page.querySelector('#Backend').value = c.Backend || 'dispatcharr';
+                    page.querySelector('#XtreamUrl').value = c.XtreamUrl || '';
+                    page.querySelector('#XtreamUsername').value = c.XtreamUsername || '';
+                    page.querySelector('#XtreamPassword').value = c.XtreamPassword || '';
                     page.querySelector('#DispatcharrUrl').value = c.DispatcharrUrl || '';
                     page.querySelector('#DispatcharrApiKey').value = c.DispatcharrApiKey || '';
                     page.querySelector('#DispatcharrProfile').value = c.DispatcharrProfile || '';
@@ -83,6 +109,10 @@
                 e.preventDefault();
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
+                    c.Backend = page.querySelector('#Backend').value;
+                    c.XtreamUrl = page.querySelector('#XtreamUrl').value.trim();
+                    c.XtreamUsername = page.querySelector('#XtreamUsername').value.trim();
+                    c.XtreamPassword = page.querySelector('#XtreamPassword').value;
                     c.DispatcharrUrl = page.querySelector('#DispatcharrUrl').value.trim();
                     c.DispatcharrApiKey = page.querySelector('#DispatcharrApiKey').value.trim();
                     c.DispatcharrProfile = page.querySelector('#DispatcharrProfile').value.trim();
