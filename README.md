@@ -2,6 +2,9 @@
 
 Start-over and replay for Jellyfin Live TV.
 
+> **Beta.** A hobby project, tested on one setup (Jellyfin 12, Dispatcharr, XC providers, Android TV client).
+> Issues and pull requests are welcome; there is no guaranteed support.
+
 Pick a programme that already aired, or one that is on right now, and watch it **from the beginning** in the
 normal player of any Jellyfin client. The plugin answers with the best source:
 
@@ -30,13 +33,18 @@ Catch-up backends are pluggable (`ICatchupBackend`: channels with an archive, wh
 span). Included today:
 
 - **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** with XC accounts that offer catch-up (`tv_archive`).
+  Channels are matched to Jellyfin by **channel number**.
+- **Xtream Codes account, directly** (no middleware): the archive comes from the provider's `player_api.php` and
+  `timeshift` endpoints. Channels are matched to Jellyfin by **channel name**. Tested against a mock server only.
 
 Without a configured backend the plugin still offers everything in the first two rows.
 
 ## Requirements
 
 - Jellyfin 12.x
-- For provider catch-up: Dispatcharr and an API key of a **standard** (non-admin) Dispatcharr user
+- For provider catch-up, one of:
+  - Dispatcharr and an API key of a **standard** (non-admin) Dispatcharr user
+  - An Xtream Codes account with catch-up (`tv_archive`)
 - Disk space for the cache (default limit 30 GB; roughly 3.5 GB per hour of HD)
 
 ## Install
@@ -53,14 +61,22 @@ Install **Catch-up** from the catalogue and restart Jellyfin.
 
 | Setting | Meaning |
 |---|---|
+| Catch-up source | `Dispatcharr` or `Xtream Codes account (directly)` |
+| Xtream server / username / password | Only for the Xtream source, e.g. `http://provider.example:8080`. Stored on the server only |
 | Dispatcharr URL | As reachable from the Jellyfin server, e.g. `http://dispatcharr:9191` |
 | Dispatcharr API key | Key of a non-admin user. Stored on the server only |
 | Channel profile | Dispatcharr profile used by Jellyfin's tuner (XMLTV for past programmes) |
 | Look back (hours) | How far back programmes are offered (provider limits still apply) |
+| Archive time zone | Only if replays start an hour or two off, see below. IANA name, e.g. `Europe/Zurich` |
 | Use provider catch-up | Off = recordings only |
 | Cache directory / limit | Where segments are kept and how much (oldest programmes go first; unused ones after 6 h) |
 
-Channels are matched between Jellyfin and the backend by **channel number**.
+### Replays start an hour off?
+
+Some providers report UTC as their server time zone but index the archive in local time. Replays then start one
+or two hours early or late (summer time). Check with a news channel that shows a clock: if a replay for 16:00 shows
+15:00, set **Archive time zone** to the zone the archive really uses (e.g. `Europe/Zurich`). The shift follows
+summer time.
 
 ## How it behaves
 
@@ -83,6 +99,9 @@ Channels are matched between Jellyfin and the backend by **channel number**.
 `ItemId` plays in the client's normal player. `ItemStartUtc` is the wall-clock time of position zero of a
 recording (recordings start before the programme), for clients that seek to "20 minutes ago".
 `offset` (seconds into the programme) lets the server start downloading where playback will begin.
+`Next` lists up to four programmes that follow without a gap (same fields, nothing downloaded yet), so a client
+can queue them and keep playing into the next programme. `404 {Error:"not_in_archive"}` means the provider has no
+archive for that time.
 
 The HLS endpoints under `/Catchup/Hls/` are read by the server's own ffmpeg; from elsewhere they need a signed-in user.
 
@@ -92,6 +111,8 @@ API-key requests may pass `userId=` like Jellyfin's own endpoints.
 
 - Programme boundaries come from the guide; a 5-minute tail covers overruns.
 - Seeking past "now" in a programme that is still airing has nothing to show (clients should cap the seek).
+- Requests are limited to programmes that started at most 31 days ago and last at most 12 hours.
+- Programmes the provider has no archive for answer `404 {Error:"not_in_archive"}` after a few seconds.
 - Tested with Dispatcharr and XC providers that allow one connection.
 
 ## Build

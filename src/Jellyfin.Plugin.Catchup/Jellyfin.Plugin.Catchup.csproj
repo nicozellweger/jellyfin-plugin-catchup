@@ -10,10 +10,10 @@
     <LangVersion>latest</LangVersion>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>CS1591;CA1819;CA1308;CA1822;CA1031;CA2007</NoWarn>
-    <Version>0.1.0</Version>
-    <AssemblyVersion>0.1.0.0</AssemblyVersion>
-    <FileVersion>0.1.0.0</FileVersion>
-    <Description>Catch-up / replay for Live TV: past programmes and start-over playback from recordings or an IPTV backend (Dispatcharr).</Description>
+    <Version>0.2.0</Version>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <FileVersion>0.2.0.0</FileVersion>
+    <Description>Catch-up / replay for Live TV: past programmes and start-over playback from recordings or an IPTV backend (Dispatcharr or Xtream Codes).</Description>
   </PropertyGroup>
 
   <ItemGroup>
