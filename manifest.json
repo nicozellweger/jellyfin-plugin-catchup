@@ -6,6 +6,15 @@
     "overview": "Start-over and replay for Live TV programmes.",
     "owner": "nicozellweger",
     "category": "LiveTV",
-    "versions": []
+    "versions": [
+      {
+        "version": "0.2.0.0",
+        "changelog": "https://github.com/nicozellweger/jellyfin-plugin-catchup/releases/tag/v0.2.0",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/nicozellweger/jellyfin-plugin-catchup/releases/download/v0.2.0/catchup_0.2.0.zip",
+        "checksum": "6cc2a11fa4c4381ae96ede45d51afb43",
+        "timestamp": "2026-11-21T14:27:04Z"
+      }
+    ]
   }
 ]
